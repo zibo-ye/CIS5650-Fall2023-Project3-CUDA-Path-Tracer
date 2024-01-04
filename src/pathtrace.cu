@@ -13,8 +13,17 @@
 #include "pathtrace.h"
 #include "intersections.h"
 #include "interactions.h"
+#include "device_launch_parameters.h"
 
 #define ERRORCHECK 1
+
+//The following macro is to make intellisense happy. 
+//See: https://stackoverflow.com/a/63084481
+#ifdef __INTELLISENSE__
+#define CUDA_KERNEL(...)
+#else
+#define CUDA_KERNEL(...) <<< __VA_ARGS__ >>>
+#endif
 
 #define FILENAME (strrchr(__FILE__, '/') ? strrchr(__FILE__, '/') + 1 : __FILE__)
 #define checkCUDAError(msg) checkCUDAErrorFn(msg, FILENAME, __LINE__)
@@ -334,7 +343,7 @@ void pathtrace(uchar4* pbo, int frame, int iter) {
 
 	// TODO: perform one iteration of path tracing
 
-	generateRayFromCamera << <blocksPerGrid2d, blockSize2d >> > (cam, iter, traceDepth, dev_paths);
+	generateRayFromCamera CUDA_KERNEL(blocksPerGrid2d, blockSize2d) (cam, iter, traceDepth, dev_paths);
 	checkCUDAError("generate camera ray");
 
 	int depth = 0;
@@ -352,7 +361,7 @@ void pathtrace(uchar4* pbo, int frame, int iter) {
 
 		// tracing
 		dim3 numblocksPathSegmentTracing = (num_paths + blockSize1d - 1) / blockSize1d;
-		computeIntersections << <numblocksPathSegmentTracing, blockSize1d >> > (
+		computeIntersections CUDA_KERNEL(numblocksPathSegmentTracing, blockSize1d) (
 			depth
 			, num_paths
 			, dev_paths
@@ -373,7 +382,7 @@ void pathtrace(uchar4* pbo, int frame, int iter) {
 	  // TODO: compare between directly shading the path segments and shading
 	  // path segments that have been reshuffled to be contiguous in memory.
 
-		shadeFakeMaterial << <numblocksPathSegmentTracing, blockSize1d >> > (
+		shadeFakeMaterial CUDA_KERNEL(numblocksPathSegmentTracing, blockSize1d) (
 			iter,
 			num_paths,
 			dev_intersections,
@@ -390,12 +399,12 @@ void pathtrace(uchar4* pbo, int frame, int iter) {
 
 	// Assemble this iteration and apply it to the image
 	dim3 numBlocksPixels = (pixelcount + blockSize1d - 1) / blockSize1d;
-	finalGather << <numBlocksPixels, blockSize1d >> > (num_paths, dev_image, dev_paths);
+	finalGather CUDA_KERNEL(numBlocksPixels, blockSize1d) (num_paths, dev_image, dev_paths);
 
 	///////////////////////////////////////////////////////////////////////////
 
 	// Send results to OpenGL buffer for rendering
-	sendImageToPBO << <blocksPerGrid2d, blockSize2d >> > (pbo, cam.resolution, iter, dev_image);
+	sendImageToPBO CUDA_KERNEL(blocksPerGrid2d, blockSize2d) (pbo, cam.resolution, iter, dev_image);
 
 	// Retrieve image from GPU
 	cudaMemcpy(hst_scene->state.image.data(), dev_image,
