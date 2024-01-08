@@ -150,6 +150,7 @@ bool init() {
 		return false;
 	}
 	glfwMakeContextCurrent(window);
+	glfwSwapInterval(0);
 	glfwSetKeyCallback(window, keyCallback);
 	glfwSetCursorPosCallback(window, mousePositionCallback);
 	glfwSetMouseButtonCallback(window, mouseButtonCallback);

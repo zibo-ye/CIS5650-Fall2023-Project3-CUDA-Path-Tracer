@@ -4,6 +4,8 @@
 #include <thrust/execution_policy.h>
 #include <thrust/random.h>
 #include <thrust/remove.h>
+#include <thrust/sort.h>
+#include <thrust/device_vector.h>
 
 #include "sceneStructs.h"
 #include "scene.h"
@@ -262,14 +264,12 @@ __global__ void shadeFakeMaterial(
 			// If the material indicates that the object was a light, "light" the ray
 			if (material.emittance > 0.0f) {
 				pathSegments[idx].color *= (materialColor * material.emittance);
+				//Mark as finished.
+				pathSegments[idx].remainingBounces = 0;
 			}
-			// Otherwise, do some pseudo-lighting computation. This is actually more
-			// like what you would expect from shading in a rasterizer like OpenGL.
-			// TODO: replace this! you should be able to start with basically a one-liner
+			// Otherwise, generate a new ray to continue the ray path
 			else {
-				float lightTerm = glm::dot(intersection.surfaceNormal, glm::vec3(0.0f, 1.0f, 0.0f));
-				pathSegments[idx].color *= (materialColor * lightTerm) * 0.3f + ((1.0f - intersection.t * 0.02f) * materialColor) * 0.7f;
-				pathSegments[idx].color *= u01(rng); // apply some noise because why not
+				scatterRay(pathSegments[idx], getPointOnRay(pathSegments[idx].ray, intersection.t), intersection.surfaceNormal, material, rng);
 			}
 			// If there was no intersection, color the ray black.
 			// Lots of renderers use 4 channel color, RGBA, where A = alpha, often
@@ -278,6 +278,8 @@ __global__ void shadeFakeMaterial(
 		}
 		else {
 			pathSegments[idx].color = glm::vec3(0.0f);
+			//Mark as finished.
+			pathSegments[idx].remainingBounces = 0;
 		}
 	}
 }
@@ -293,6 +295,29 @@ __global__ void finalGather(int nPaths, glm::vec3* image, PathSegment* iteration
 		image[iterationPath.pixelIndex] += iterationPath.color;
 	}
 }
+
+struct is_terminated
+{
+	glm::vec3* image;
+	is_terminated(glm::vec3* img) : image(img) {}
+
+	__device__
+	bool operator()(const PathSegment& pathSeg)
+	{
+		if (pathSeg.remainingBounces <= 0) {
+			image[pathSeg.pixelIndex] += pathSeg.color;
+			return true;
+		}
+		return false;
+	}
+};
+
+struct my_less {
+	__host__ __device__
+		bool operator()(const ShadeableIntersection& a, const ShadeableIntersection& b) const {
+		return a.materialId < b.materialId;
+	}
+};
 
 /**
  * Wrapper for the __global__ call that sets up the kernel calls and does a ton
@@ -350,6 +375,8 @@ void pathtrace(uchar4* pbo, int frame, int iter) {
 	PathSegment* dev_path_end = dev_paths + pixelcount;
 	int num_paths = dev_path_end - dev_paths;
 
+	auto thrust_dev_intersections = thrust::device_ptr<ShadeableIntersection>(dev_intersections);
+	auto thrust_dev_paths = thrust::device_ptr<PathSegment>(dev_paths);
 	// --- PathSegment Tracing Stage ---
 	// Shoot ray into scene, bounce between objects, push shading chunks
 
@@ -373,14 +400,9 @@ void pathtrace(uchar4* pbo, int frame, int iter) {
 		cudaDeviceSynchronize();
 		depth++;
 
-		// TODO:
-		// --- Shading Stage ---
-		// Shade path segments based on intersections and generate new rays by
-	  // evaluating the BSDF.
-	  // Start off with just a big kernel that handles all the different
-	  // materials you have in the scenefile.
-	  // TODO: compare between directly shading the path segments and shading
-	  // path segments that have been reshuffled to be contiguous in memory.
+		//Sort paths by material id
+
+		// thrust::sort_by_key(thrust_dev_intersections, thrust_dev_intersections + num_paths, thrust_dev_paths, my_less());
 
 		shadeFakeMaterial CUDA_KERNEL(numblocksPathSegmentTracing, blockSize1d) (
 			iter,
@@ -389,7 +411,13 @@ void pathtrace(uchar4* pbo, int frame, int iter) {
 			dev_paths,
 			dev_materials
 			);
-		iterationComplete = true; // TODO: should be based off stream compaction results.
+
+		//stream compaction
+		is_terminated terminator(dev_image);
+		dev_path_end = thrust::remove_if(thrust::device, dev_paths, dev_paths + num_paths, terminator);
+		num_paths = dev_path_end - dev_paths;
+
+		iterationComplete = (num_paths == 0);
 
 		if (guiData != NULL)
 		{
@@ -398,8 +426,8 @@ void pathtrace(uchar4* pbo, int frame, int iter) {
 	}
 
 	// Assemble this iteration and apply it to the image
-	dim3 numBlocksPixels = (pixelcount + blockSize1d - 1) / blockSize1d;
-	finalGather CUDA_KERNEL(numBlocksPixels, blockSize1d) (num_paths, dev_image, dev_paths);
+	//dim3 numBlocksPixels = (pixelcount + blockSize1d - 1) / blockSize1d;
+	//finalGather CUDA_KERNEL(numBlocksPixels, blockSize1d) (num_paths, dev_image, dev_paths);
 
 	///////////////////////////////////////////////////////////////////////////
 
